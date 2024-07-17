@@ -6,15 +6,18 @@ import os
 from twikit import Client
 from PIL import Image
 import random
+from dotenv import load_dotenv
 import io
 
-# Twitter credentials
-USERNAME = os.environ.get('TWITTER_USERNAME')
-EMAIL = os.environ.get('TWITTER_EMAIL')
-PASSWORD = os.environ.get('TWITTER_PASSWORD')
+# Load environment variables
+load_dotenv()
 
-# Tenor API key
-TENOR_API_KEY = os.environ.get('TENOR_API_KEY')
+
+# Twitter credentials
+USERNAME = os.getenv('TWITTER_USERNAME')
+EMAIL = os.getenv('TWITTER_EMAIL')
+PASSWORD = os.getenv('TWITTER_PASSWORD')
+TENOR_API_KEY = os.getenv('TENOR_API_KEY')
 
 # Initialize the client
 client = Client('en-US')
