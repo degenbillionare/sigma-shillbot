@@ -6,17 +6,21 @@ import os
 from twikit import Client
 from PIL import Image
 import random
-from dotenv import load_dotenv
 import io
+import sqlite3
+from sqlite3 import Error
+from dotenv import load_dotenv
+from functools import partial
 
 # Load environment variables
 load_dotenv()
-
 
 # Twitter credentials
 USERNAME = os.getenv('TWITTER_USERNAME')
 EMAIL = os.getenv('TWITTER_EMAIL')
 PASSWORD = os.getenv('TWITTER_PASSWORD')
+
+# Tenor API key
 TENOR_API_KEY = os.getenv('TENOR_API_KEY')
 
 # Initialize the client
@@ -29,6 +33,7 @@ RETWEET_RATE_LIMIT = 337  # 337 retweets per 15 minutes
 MEDIA_UPLOAD_RATE_LIMIT = 375  # Assuming same as favorites
 TWEET_RATE_LIMIT = 300  # 300 tweets per 3 hours
 RATE_LIMIT_WINDOW = 15 * 60  # 15 minutes in seconds
+FOLLOW_RATE_LIMIT = 400  # 400 follows per 24 hours
 
 # Track API calls
 search_calls = 0
@@ -36,6 +41,7 @@ favorite_calls = 0
 retweet_calls = 0
 media_upload_calls = 0
 tweet_calls = 0
+follow_calls = 0
 
 # Timestamps for rate limit windows
 search_window_start = time.time()
@@ -43,10 +49,38 @@ favorite_window_start = time.time()
 retweet_window_start = time.time()
 media_upload_window_start = time.time()
 tweet_window_start = time.time()
+follow_window_start = time.time()
+
+def create_connection():
+    conn = None
+    try:
+        conn = sqlite3.connect('sigma_bot.db')
+        return conn
+    except Error as e:
+        print(e)
+    return conn
+
+def create_table(conn):
+    try:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS processed_tweets
+                     (id TEXT PRIMARY KEY, processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    except Error as e:
+        print(e)
+
+def is_tweet_processed(conn, tweet_id):
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM processed_tweets WHERE id=?", (tweet_id,))
+    return cur.fetchone() is not None
+
+def mark_tweet_processed(conn, tweet_id):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO processed_tweets (id) VALUES (?)", (tweet_id,))
+    conn.commit()
 
 async def rate_limit_delay(action):
-    global search_calls, favorite_calls, retweet_calls, media_upload_calls, tweet_calls
-    global search_window_start, favorite_window_start, retweet_window_start, media_upload_window_start, tweet_window_start
+    global search_calls, favorite_calls, retweet_calls, media_upload_calls, tweet_calls, follow_calls
+    global search_window_start, favorite_window_start, retweet_window_start, media_upload_window_start, tweet_window_start, follow_window_start
     
     current_time = time.time()
 
@@ -60,6 +94,8 @@ async def rate_limit_delay(action):
         await reset_window(current_time, 'media_upload')
     elif action == 'tweet' and tweet_calls >= TWEET_RATE_LIMIT:
         await reset_window(current_time, 'tweet')
+    elif action == 'follow' and follow_calls >= FOLLOW_RATE_LIMIT:
+        await reset_window(current_time, 'follow')
 
 async def reset_window(current_time, action):
     global search_window_start, favorite_window_start, retweet_window_start, media_upload_window_start, tweet_window_start
@@ -72,6 +108,16 @@ async def reset_window(current_time, action):
     
     globals()[f"{action}_calls"] = 0
     globals()[f"{action}_window_start"] = time.time()
+
+async def follow_user(user_id: str):
+    global follow_calls
+    await rate_limit_delay('follow')
+    try:
+        await client.follow_user(user_id)
+        follow_calls += 1
+        print(f"Followed user with ID: {user_id}")
+    except Exception as e:
+        print(f"Error following user: {e}")
 
 async def compress_gif(file_path, max_size_bytes=5000000):  # Slightly under 5MB to be safe
     with Image.open(file_path) as img:
@@ -115,7 +161,15 @@ async def get_random_sigma_gif(session):
     return None
 
 async def main():
-    global search_calls, favorite_calls, retweet_calls, media_upload_calls, tweet_calls
+    global search_calls, favorite_calls, retweet_calls, media_upload_calls, tweet_calls, follow_calls
+
+    # Create database connection and table
+    conn = create_connection()
+    if conn is not None:
+        create_table(conn)
+    else:
+        print("Error! Cannot create the database connection.")
+        return
 
     # Log in to your Twitter account
     await client.login(
@@ -135,6 +189,17 @@ async def main():
                 # Iterate through the tweets
                 for tweet in tweets:
                     try:
+                        # Check if we've already processed this tweet
+                        if is_tweet_processed(conn, tweet.id):
+                            continue
+
+                        # Check if the tweet is from our own account
+                        if tweet.user.id == await client.user_id():
+                            continue
+
+                        # Follow the user
+                        await follow_user(tweet.user.id)
+
                         # Favorite the tweet
                         await rate_limit_delay('favorite')
                         await client.favorite_tweet(tweet.id)
@@ -181,6 +246,9 @@ async def main():
                         else:
                             print("Failed to get a Sigma GIF")
 
+                        # Mark the tweet as processed
+                        mark_tweet_processed(conn, tweet.id)
+
                         print(f"Processed tweet from {tweet.user.name}: {tweet.text}")
                     except Exception as e:
                         print(f"Error processing tweet: {e}")
@@ -192,6 +260,9 @@ async def main():
                 print(f"An error occurred: {e}")
                 await asyncio.sleep(300)  # Wait for 5 minutes before retrying
 
+    # Close the database connection
+    conn.close()
 
 # Run the main function
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
